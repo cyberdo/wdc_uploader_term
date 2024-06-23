@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# vim:showmatch:ts=4:sts=4:sw=4:autoindent:smartindent:smarttab:expandtab:number
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Author: ECNX Developments
@@ -43,6 +44,7 @@ import array
 import serial
 from serial.tools.list_ports import comports
 from serial.tools import hexlify_codec
+from pprint import pprint
 
 __author__ = "ECNX Developments"
 __copyright__ = "Copyright 2017, ECNX Development"
@@ -800,6 +802,186 @@ class EMCSerial:
         inf = inf.upper()
         return inf
 
+def le2num(indata):
+    if type(indata) == str:
+        if indata.startswith('0x'):
+            indata = indata[2:]
+        indata = [ indata[i*2:i*2+2] for i in range(int(len(indata)/2))]
+    middata = '0x' + ''.join([indata[i].rjust(2, '0') for i in (range(len(indata)-1, -1, -1))])
+    return int(middata, 16)
+
+def num2le(num, bytes):
+    #num=int('0x12012345',16)
+    hexstring=hex(num)[2:]
+    #hexstring=hexstring.rjust(math.ceil(len(hexstring)/2)*2, '0')
+    hexstring=hexstring.rjust(bytes*2, '0')
+    outstring=[hexstring[i-2:i] for i in range(len(hexstring), 0, -2)]
+    return outstring
+def num2be(num, bytes):
+    #num=int('0x12012345',16)
+    hexstring=hex(num)[2:]
+    #hexstring=hexstring.rjust(math.ceil(len(hexstring)/2)*2, '0')
+    hexstring=hexstring.rjust(bytes*2, '0')
+    #outstring=[hexstring[i-2:i] for i in range(len(hexstring), 0, -2)]
+    outstring=[hexstring[i:i+2] for i in range(0, len(hexstring), 2)]
+    return outstring
+
+
+
+class InfileDataBlock:
+    address = None
+    data = []
+    length = []
+class InfileData:
+    execAddress = None;
+    blocks = []
+
+def parse_infile(content):
+        first_char = content[0]
+        if args.FILENAME.lower().endswith('.bin') or args.FILENAME.lower().endswith('.out'):
+            # assume binary file
+            data = list(content)
+            # intel hex file(?)
+            
+            ifdata = InfileData()
+
+            addr = 0
+            if args.address:
+                addr = le2num(args.address);
+
+            #while data[0] == 0:
+            #    addr = addr + 1
+            #    data.pop(0)
+
+            ifdata.execAddress = addr
+            print(addr)
+
+            while len(data):
+                block = InfileDataBlock()
+                outData = data[:1023]
+                data = data[1023:]
+
+                block.data = [hex(c)[2:].rjust(2,'0') for c in outData]
+                block.address = addr
+                block.length = len(outData)
+                addr = addr + block.length
+                ifdata.blocks.append(block)
+
+            return ifdata
+        elif first_char == 0x5a:
+            bytes = binascii.hexlify(content)
+            byte_array = [bytes[i:i+2].decode('utf-8')
+                          for i in range(0, len(bytes), 2)]
+            #print(byte_array)
+            # Strip the leadin Z
+            byte_array = byte_array[1:]
+
+            ifdata = InfileData()
+            blocks = ifdata.blocks
+            i = 0
+            addrs = byte_array[:3]
+            ifdata.execAddress = le2num(addrs)
+            while byte_array:
+                key = 'block'+str(i)
+                block = InfileDataBlock()
+                block.address = le2num(byte_array[:3])
+                byte_array = byte_array[3:]
+                block.length = le2num(byte_array[:3])
+                # length = "0x"+byte_array[:2][1]+byte_array[:2][0]
+                length = block.length
+                byte_array = byte_array[3:]
+                block.data = byte_array[:length]
+                byte_array = byte_array[length:]
+                if length == 0:
+                    break
+                i += 1
+
+                ifdata.blocks.append(block)
+                addr = ''.join(num2be(block.address, 3))
+                leng = ''.join(num2be(block.length, 3))
+                print("Writing 0x%s (%s) bytes to address 0x%s" % (
+                    leng.upper(), int("0x"+leng, 16), addr.upper()))
+                if args.verbose > 0:
+                    print("Data => ")
+                    s = ' '.join(block.data)
+                    s = s.upper()
+                    address = block.address
+
+                    for i in range(0, len(s), 48):
+                        print("%s:\t%s" %
+                              (hex(address)[2:].upper(), s[i:i+48]))
+                        address += 16
+                    print("\n")
+            return ifdata
+
+        if first_char == 0x3a:
+            data = list(content)
+            # intel hex file(?)
+            lines = ['']
+            while len(data):
+                char = data.pop(0)
+                if char == 13 or char == 10:
+                    if lines[-1] != '':
+                        lines.append('')
+                else:
+                    lines[-1] += chr(char)
+
+            if len(lines[-1]) == 0:
+                lines.pop()
+            
+            lines = [line.split(':')[1] for line in lines]
+            ifdata = InfileData()
+            for line in lines:
+                bytecount = int(line[0:2], 16)
+                address = int(line[2:6], 16)
+                type = int(line[6:8], 16)
+                data = []
+                if bytecount > 0:
+                    data = line[8:(8+bytecount*2)]
+                checksum = int(line[(8+bytecount*2):(8+bytecount*2+2)], 16)
+                testsum=sum([int(line[i:i+2], 16) for i in range(0, (8+bytecount*2), 2)])
+                calcchecksum = ((testsum&0xff) - 1)^0xff;
+                if checksum != calcchecksum:
+                    print("Intel hex file checksum missmatch")
+                    sys.exit(-1)
+
+                if type == 0:
+                    block = InfileDataBlock()
+                    block.length = bytecount
+                    block.address = address
+                    block.data = [data[i:i+2] for i in range(0, len(data), 2)]
+                    if ifdata.execAddress is None:
+                        ifdata.execAddress = address
+                    ifdata.blocks.append(block)
+                elif type == 1:
+                    break;
+                else:
+                    print("Intel hex file. Unhandled type: %d" % type)
+                    sys.exit(-1)
+                
+            # All generated blocks: If one is folliwing another: join them.
+            # This speeds up transmission to the board by reducing potentially
+            # 32k blocks to 1.
+            # It will NOT handle out-of-order blocks
+            startblocks = len(ifdata.blocks)
+            for i in range(len(ifdata.blocks)-1, 0, -1):
+                me = ifdata.blocks[i]
+                prev = ifdata.blocks[i-1]
+                if (prev.address + prev.length) == me.address:
+                    if (args.verbose > 1):
+                        print ("Merge %d and %d" %(i, i-1))
+                    prev.length = prev.length + me.length
+                    prev.data.extend(me.data)
+                    ifdata.blocks.pop(i)
+
+            if (args.verbose > 0):
+                print("Compressed %d blocks down to %d"%(startblocks, len(ifdata.blocks)))
+            return ifdata
+
+        print("Error: File is not a Z-bin file")
+        sys.exit(1)
+
+        return None
 ####################################
 #
 # Main Program Start
@@ -1072,18 +1254,25 @@ if __name__ == '__main__':
         if os.path.isfile(args.FILENAME):
             with open(args.FILENAME, 'rb') as f:
                 content = f.read()
+                ifdata = parse_infile(content)
+                # fix for flash
+                # bytes = binascii.hexlify(content)
+                # byte_array = [bytes[i:i+2].decode('utf-8')
+                #               for i in range(0, len(bytes), 2)]
+                # # Strip the leadin Z
+                # byte_array = byte_array[1:]
+
+
+
                 #first_char = content[0]
-                # if first_char != 'Z':
+                #if first_char == 'Z':
+
                 #     print("Error: File is not a Z-bin file")
                 #     sys.exit(1)
         else:
             print("Error: File %s does not exist" % args.FILENAME)
             sys.exit(1)
 
-        bytes = binascii.hexlify(content)
-        byte_array = [bytes[i:i+2].decode('utf-8')
-                      for i in range(0, len(bytes), 2)]
-        byte_array = byte_array[1:]
 
     if args.mode == "raw":
         if args.hex_string is not None:
@@ -1216,52 +1405,23 @@ if __name__ == '__main__':
 
         if not args.flash:
             print("Writing contents of %s to memory..." % (args.FILENAME))
-            blocks = {}
             i = 0
-            addrs = byte_array[:3]
-            while byte_array:
-                key = 'block'+str(i)
-                blocks[key] = {}
-                blocks[key]['Address'] = byte_array[:3]
-                byte_array = byte_array[3:]
-                blocks[key]['Length'] = byte_array[:3]
-                # length = "0x"+byte_array[:2][1]+byte_array[:2][0]
-                length = "0x"+byte_array[:3][2] + byte_array[:3][1] + byte_array[:3][0]
-                length = int(length, 16)
-                byte_array = byte_array[3:]
-                blocks[key]['Data'] = byte_array[:length]
-                byte_array = byte_array[length:]
-                if length == 0:
-                    blocks.pop(key, None)
-                    break
-                i += 1
-
-                addr = blocks[key]['Address'][2]+blocks[key]['Address'][1]+blocks[key]['Address'][0]
-                leng = blocks[key]['Length'][2]+blocks[key]['Length'][1]+blocks[key]['Length'][0]
-                print("Writing 0x%s (%s) bytes to address 0x%s" % (
-                    leng.upper(), int("0x"+leng, 16), addr.upper()))
-                if args.verbose > 0:
-                    print("Data => ")
-                    s = ' '.join(blocks[key]['Data'])
-                    s = s.upper()
-                    address = int(
-                        "0x"+blocks[key]['Address'][1]+blocks[key]['Address'][0], 16)
-                    for i in range(0, len(s), 48):
-                        print("%s:\t%s" %
-                              (hex(address)[2:].upper(), s[i:i+48]))
-                        address += 16
-                    print("\n")
+            for block in ifdata.blocks:
                 emcSerial.write_bin_block(
-                    EMC_WRITE_MEM_COMMAND, blocks[key]['Address'], blocks[key]['Length'], blocks[key]['Data'])
+                    EMC_WRITE_MEM_COMMAND,
+                    num2le(block.address, 3),
+                    num2le(block.length, 3),
+                    block.data)
+
                 resp = emcSerial.separate_hex(emcSerial.read_serial())
                 if resp != '00':
                     print("Error: %s Failed Write Bytes in Memmory" % resp)
                     sys.exit(0)
 
             if args.execute:
-                adrs = addrs[2]+addrs[1]+addrs[0]
-                print("\nExecuting program at address 0x%s in memory" % adrs)
-                emcSerial.write_bin_block(EMC_EXECUTE_MEM_COMMAND, addrs)
+                addrs = num2le(ifdata.execAddress, 3)
+                print("\nExecuting program at address 0x%s in memory" % ''.join(addrs))
+                emcSerial.write_bin_block(EMC_EXECUTE_MEM_COMMAND, num2le(ifdata.execAddress, 3))
 
         else:
             if byte_array[1].upper() != '80' or byte_array[0].upper() != '00':
